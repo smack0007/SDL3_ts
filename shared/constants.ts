@@ -1,0 +1,22 @@
+import { join, SEPARATOR } from "@std/path";
+
+const IS_WINDOWS = Deno.build.os === "windows";
+
+export const ROOT_PATH = new URL(import.meta.url).pathname
+  .replaceAll("/", IS_WINDOWS ? "\\" : "/")
+  .substring(IS_WINDOWS ? 1 : 0)
+  .split(SEPARATOR)
+  .slice(0, -2)
+  .join(SEPARATOR);
+
+export const ASSETS_PATH = join(ROOT_PATH, "assets");
+
+export const EXAMPLES_PATH = join(ROOT_PATH, "examples");
+
+export const EXT_PATH = join(ROOT_PATH, "ext");
+
+export const SRC_PATH = join(ROOT_PATH, "src");
+
+export const TMP_PATH = join(ROOT_PATH, "tmp");
+
+export const TOOLS_PATH = join(ROOT_PATH, "tools");
