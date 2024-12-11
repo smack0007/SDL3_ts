@@ -6,11 +6,14 @@ export function chdir(directory: string): void {
 
 interface ExecOptions {
   doNotThrowOnFailure?: boolean;
+  captureOutput?: boolean;
 }
 
 interface ExecResult {
   code: number;
   success: boolean;
+  stdout: string;
+  stderr: string;
 }
 
 export async function exec(
@@ -23,18 +26,39 @@ export async function exec(
     stderr: "piped",
   }).spawn();
 
-  copy(readerFromStreamReader(command.stdout.getReader()), Deno.stdout);
-  copy(readerFromStreamReader(command.stderr.getReader()), Deno.stderr);
+  let result: {
+    code: number;
+    success: boolean;
+    stdout?: Uint8Array;
+    stderr?: Uint8Array;
+  };
 
-  const commandStaus = await command.status;
+  if (!options.captureOutput) {
+    copy(readerFromStreamReader(command.stdout.getReader()), Deno.stdout);
+    copy(readerFromStreamReader(command.stderr.getReader()), Deno.stderr);
+    result = await command.status;
+  } else {
+    result = await command.output();
+  }
 
-  if (!commandStaus.success && !options.doNotThrowOnFailure) {
+  if (!result.success && !options.doNotThrowOnFailure) {
     throw new Error(
-      `Command '${args.join(" ")}' failed with code ${commandStaus.code}.`
+      `Command '${args.join(" ")}' failed with code ${result.code}.`
     );
   }
 
   return {
-    ...commandStaus,
+    code: result.code,
+    success: result.success,
+    stdout: options.captureOutput
+      ? new TextDecoder().decode(result.stdout)
+      : "",
+    stderr: options.captureOutput
+      ? new TextDecoder().decode(result.stderr)
+      : "",
   };
+}
+
+export function exit(code: number = 0): void {
+  Deno.exit(code);
 }

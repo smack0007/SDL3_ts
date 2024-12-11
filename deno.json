@@ -17,10 +17,11 @@
     "@std/fs": "jsr:@std/fs@1",
     "@std/fmt": "jsr:@std/fmt@1",
     "@std/io": "jsr:@std/io@0.225.0",
-    "@std/path": "jsr:@std/path@1"
+    "@std/path": "jsr:@std/path@1",
+    "@std/streams": "jsr:@std/streams@1"
   },
   "tasks": {
-    "codegen": "deno -RW --allow-run ./scripts/codegen/main.ts",
+    "codegen": "deno -RW --allow-run ./scripts/codegen.ts",
     "examples:renderer:01-clear": "deno --allow-ffi ./examples/renderer/01-clear/clear.ts",
     "install-sdl3": "deno -RW --allow-run ./scripts/install-sdl3.ts"
   }

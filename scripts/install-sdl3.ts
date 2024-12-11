@@ -4,8 +4,7 @@ import {
   ensureDirectory,
   removeDirectory,
 } from "../shared/fs.ts";
-import { join } from "../shared/path.ts";
-import { chdir, exec } from "../shared/process.ts";
+import { chdir, exec, exit } from "../shared/process.ts";
 
 const BUILD_DIR = "build";
 
@@ -45,5 +44,5 @@ try {
   await main();
 } catch (error) {
   console.error(error);
-  Deno.exitCode = 1;
+  exit(1);
 }
