@@ -1,5 +1,5 @@
 import { Enum, Flags } from "../types.ts";
-import * as $ from "./_metadata.ts";
+import * as $ from "./_enums.ts";
 
 export const App = {
   CONTINUE: $.SDL_APP_CONTINUE,

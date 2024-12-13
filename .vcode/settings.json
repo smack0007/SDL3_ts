@@ -1,0 +1,20 @@
+{
+  "deno.config": "./deno.json",
+  "deno.enable": true,
+  "deno.lint": true,
+  "deno.unstable": true,
+
+  "editor.tabSize": 2,
+
+  // Ensure deno is the formatter for all file types.
+  "editor.defaultFormatter": "denoland.vscode-deno",
+  "[josn]": {
+    "editor.defaultFormatter": "denoland.vscode-deno"
+  },
+  "[markdown]": {
+    "editor.defaultFormatter": "denoland.vscode-deno"
+  },
+  "[typescript]": {
+    "editor.defaultFormatter": "denoland.vscode-deno"
+  }
+}

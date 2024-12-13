@@ -46,3 +46,7 @@ export async function* readTextFileLines(path: string): AsyncIterable<string> {
     yield line;
   }
 }
+
+export async function writeTextFile(path: string, contents: string): Promise<void> {
+  await Deno.writeTextFile(path, contents);
+}

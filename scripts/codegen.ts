@@ -1,7 +1,13 @@
 import { SRC_PATH, TMP_PATH } from "../shared/constants.ts";
-import { ensureDirectory, listFiles, readTextFileLines } from "../shared/fs.ts";
+import {
+  ensureDirectory,
+  listFiles,
+  readTextFileLines,
+  writeTextFile,
+} from "../shared/fs.ts";
 import { basename, join, resolve } from "../shared/path.ts";
 import { chdir, exec, exit } from "../shared/process.ts";
+import { split } from "../shared/strings.ts";
 
 const EXCLUDE_HEADERS: string[] = [
   "SDL.h",
@@ -12,11 +18,18 @@ const EXCLUDE_HEADERS: string[] = [
 ] as const;
 
 const EXCLUDE_ENUMS: string[] = [
+  "DUMMY_ENUM_VALUE",
   "SDL_ALTIVEC_INTRINSICS",
+  "SDL_ANALYZER_NORETURN",
   "SDL_ANDROID_EXTERNAL_STORAGE_READ",
   "SDL_ANDROID_EXTERNAL_STORAGE_WRITE",
   "SDL_FILE",
   "SDL_LINE",
+  "SDL_MAIN_CALLBACK_STANDARD",
+  "SDL_MAIN_AVAILABLE",
+  "SDL_MAIN_EXPORTED",
+  "SDL_MAIN_HANDLED",
+  "SDL_MAIN_NEEDED",
   "SDL_MAIN_USE_CALLBACKS",
   "SDL_NO_THREAD_SAFETY_ANALYSIS",
   "SDL_MEMORY_BARRIER_USES_FUNCTION",
@@ -24,16 +37,37 @@ const EXCLUDE_ENUMS: string[] = [
   "SDL_SCANF_FORMAT_STRING",
   "SDL_SCOPED_CAPABILITY",
   "SDL_REVISION",
+  "SDL_WINAPI_FAMILY_PHONE",
 ];
 
 interface HeaderFileData {
-  enums: Array<{
-    name: string;
-    specifier: "f" | "s" | "u";
-  }>;
+  enums: Record<
+    string,
+    {
+      file: string;
+      specifier: "f" | "s" | "u";
+    }
+  >;
+
+  functions: Record<
+    string,
+    {
+      file: string;
+      return: {
+        type: string;
+      };
+      params: Record<
+        string,
+        {
+          type: string;
+        }
+      >;
+    }
+  >;
 }
 
 let output = `#include <stdio.h>
+#include <string.h>
 #include <SDL3/SDL.h>
 `;
 
@@ -60,13 +94,23 @@ function appendPrintf(value: string = "", ...args: string[]): void {
   appendLine(`printf("${value}\\n"${argsString});`);
 }
 
+function stripComments(line: string): string {
+  while (line.indexOf("/*") !== -1 && line.indexOf("*/") !== -1) {
+    line =
+      line.substring(0, line.indexOf("/*")) +
+      line.substring(line.indexOf("*/") + "*/".length);
+  }
+
+  return line;
+}
+
 async function main(): Promise<void> {
   ensureDirectory(TMP_PATH);
   chdir(TMP_PATH);
 
   const headerData = await parseHeaderFiles();
 
-  appendLine("int main() {");
+  appendLine("int main(int argc, char *argv[]) {");
 
   appendPrintf("//");
   appendPrintf(
@@ -75,56 +119,39 @@ async function main(): Promise<void> {
   appendPrintf("//");
   appendPrintf();
 
-  writeOutputEnumValues(headerData);
+  appendLine(`if (strcmp(argv[1], "enums") == 0) {`);
+  appendOutputEnums(headerData);
+  appendLine(`}`);
+
+  appendLine(`if (strcmp(argv[1], "functions") == 0) {`);
+  appendOutputFunctions(headerData);
+  appendLine(`}`);
 
   appendLine(`return 0;`);
   appendLine("}");
 
-  await Deno.writeTextFile("codegen.c", output);
+  await writeTextFile("codegen.c", output);
+  await exec(["gcc", "-o", "codegen", "codegen.c"]);
 
-  const compileCommand = new Deno.Command("gcc", {
-    args: ["-o", "codegen", "codegen.c"],
-    stdin: "piped",
-    stdout: "piped",
-  }).spawn();
+  const enumsOutput = await exec(["./codegen", "enums"], {
+    captureOutput: true,
+  });
+  await writeTextFile(join([SRC_PATH, "SDL", "_enums.ts"]), enumsOutput.stdout);
 
-  const compileOutput = await compileCommand.output();
-
-  if (!compileOutput.success) {
-    console.error("Failed to compile C program.");
-    return;
-  }
-
-  const codegenCommand = new Deno.Command("./codegen", {
-    stdin: "piped",
-    stdout: "piped",
-  }).spawn();
-
-  const codegenOutput = await codegenCommand.output();
-
-  if (!codegenOutput.success) {
-    console.error("Failed to execute C program.");
-    return;
-  }
-
-  await Deno.writeTextFile(
-    join([SRC_PATH, "SDL", "_metadata.ts"]),
-    new TextDecoder().decode(codegenOutput.stdout)
+  const functionsOutput = await exec(["./codegen", "functions"], {
+    captureOutput: true,
+  });
+  await writeTextFile(
+    join([SRC_PATH, "SDL", "_functions.ts"]),
+    functionsOutput.stdout
   );
-}
 
-function writeOutputEnumValues(headerData: HeaderFileData): void {
-  headerData.enums.sort((a, b) => a.name.localeCompare(b.name));
-
-  for (const enumData of headerData.enums) {
-    const format =
-      enumData.specifier === "s" ? '"%s"' : `%${enumData.specifier}`;
-    appendPrintf(
-      `export const %s = ${format};`,
-      `"${enumData.name}"`,
-      enumData.name
-    );
-  }
+  await exec([
+    "deno",
+    "fmt",
+    join([SRC_PATH, "SDL", "_enums.ts"]),
+    join([SRC_PATH, "SDL", "_functions.ts"]),
+  ]);
 }
 
 async function parseHeaderFiles(): Promise<HeaderFileData> {
@@ -140,7 +167,8 @@ async function parseHeaderFiles(): Promise<HeaderFileData> {
   const headerFiles = await listFiles(includeDirectory, { extensions: ["h"] });
 
   const data: HeaderFileData = {
-    enums: [],
+    enums: {},
+    functions: {},
   };
 
   for (const headerFile of headerFiles) {
@@ -156,36 +184,77 @@ async function parseHeaderFile(
   path: string,
   data: HeaderFileData
 ): Promise<void> {
+  const file = basename(path);
+
+  let state: "scan" | "enum" | "function" = "scan";
+  let depth = 0;
+  let buffer: string = "";
+
   for await (let line of readTextFileLines(path)) {
-    if (line.startsWith("#define SDL_") && !line.endsWith("_h_")) {
-      line = line.substring("#define ".length);
+    line = stripComments(line.trim());
 
-      const constantOrMacro = extractConstantOrMacro(line);
-      if (
-        !constantOrMacro.isMacro &&
-        constantOrMacro.name.toUpperCase() === constantOrMacro.name &&
-        !EXCLUDE_ENUMS.includes(constantOrMacro.name) &&
-        !constantOrMacro.name.startsWith("SDL_PLATFORM_") &&
-        !data.enums.map((x) => x.name).includes(constantOrMacro.name)
-      ) {
-        let specifier: HeaderFileData["enums"][number]["specifier"] = "u";
-
-        if (constantOrMacro.value.includes('"')) {
-          specifier = "s";
-        } else if (constantOrMacro.value.includes(".")) {
-          specifier = "f";
-        }
-
-        if (constantOrMacro.name === "SDL_KMOD_ALT") {
-          console.info(constantOrMacro);
-        }
-
-        data.enums.push({
-          name: constantOrMacro.name,
-          specifier,
-        });
+    if (state === "scan") {
+      if (line.startsWith("#define SDL_") && !line.endsWith("_h_")) {
+        parseDefine(file, line, data);
+      } else if (line.startsWith("typedef enum ")) {
+        state = "enum";
+        depth = 0;
+      } else if (line.startsWith("extern SDL_DECLSPEC ")) {
+        state = "function";
       }
     }
+
+    if (state === "enum") {
+      for (let i = 0; i < line.length; i += 1) {
+        if (line[i] === "{") {
+          depth += 1;
+        } else if (line[i] === "}") {
+          depth -= 1;
+        }
+      }
+
+      buffer += line;
+
+      if (depth === 0 && line.includes(";")) {
+        parseEnum(file, buffer, data);
+        state = "scan";
+        buffer = "";
+      }
+    } else if (state === "function") {
+      buffer += line;
+
+      if (line.includes(";")) {
+        parseFunction(file, buffer, data);
+        state = "scan";
+        buffer = "";
+      }
+    }
+  }
+}
+
+function parseDefine(file: string, line: string, data: HeaderFileData): void {
+  line = line.substring("#define ".length);
+
+  const constantOrMacro = extractConstantOrMacro(line);
+  if (
+    data.enums[constantOrMacro.name] === undefined &&
+    !constantOrMacro.isMacro &&
+    constantOrMacro.name.toUpperCase() === constantOrMacro.name &&
+    !EXCLUDE_ENUMS.includes(constantOrMacro.name) &&
+    !constantOrMacro.name.startsWith("SDL_PLATFORM_")
+  ) {
+    let specifier: HeaderFileData["enums"][number]["specifier"] = "u";
+
+    if (constantOrMacro.value.includes('"')) {
+      specifier = "s";
+    } else if (constantOrMacro.value.includes(".")) {
+      specifier = "f";
+    }
+
+    data.enums[constantOrMacro.name] = {
+      file,
+      specifier,
+    };
   }
 }
 
@@ -211,23 +280,144 @@ function extractConstantOrMacro(line: string): {
     }
   }
 
-  const name = line.substring(0, index);
-  let value = line.substring(index + 1).trim();
+  return {
+    name: line.substring(0, index).trim(),
+    isMacro,
+    value: line.substring(index + 1).trim(),
+  };
+}
 
-  // Remove comment if one exists.
-  if (value.indexOf("/*") !== -1 && value.lastIndexOf("*/") !== -1) {
-    value =
-      value.substring(0, value.indexOf("/*")) +
-      value.substring(value.lastIndexOf("*/") + "*/".length);
+function parseEnum(file: string, buffer: string, data: HeaderFileData): void {
+  buffer = stripComments(buffer).substring("typedef enum ".length);
 
-    value = value.trim();
+  const parts = split(buffer, ["{", "}", ",", ";"])
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+
+  // The enums we want to parse have the names at the beginning and at the end.
+  // i.e. typedef enum Foo { Bar } Foo;
+  if (parts[0] !== parts[parts.length - 1]) {
+    return;
   }
 
-  return {
-    name,
-    isMacro,
-    value,
+  const enumNames = parts.slice(1, parts.length - 1).map((value) => {
+    if (value.startsWith("#")) {
+      return "";
+    }
+
+    if (value.indexOf("=") !== -1) {
+      value = value.substring(0, value.indexOf("=") - 1);
+    }
+
+    return value.trim();
+  });
+
+  for (const enumName of enumNames) {
+    if (
+      data.enums[enumName] === undefined &&
+      enumName !== "" &&
+      !EXCLUDE_ENUMS.includes(enumName)
+    ) {
+      data.enums[enumName] = {
+        file,
+        specifier: "u",
+      };
+    }
+  }
+}
+
+function parseFunction(
+  file: string,
+  buffer: string,
+  data: HeaderFileData
+): void {
+  buffer = stripComments(buffer)
+    .substring("extern SDL_DECLSPEC ".length)
+    .replace("SDLCALL ", "")
+    .replace("SDL_ANALYZER_NORETURN;", ";");
+
+  const parts = split(buffer, ["(", ")", ",", ";"])
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+
+  const returnTypeSplit = parts[0].lastIndexOf(" ");
+  let returnType = parts[0].substring(0, returnTypeSplit);
+  let name = parts[0].substring(returnTypeSplit + 1);
+
+  while (name.startsWith("*")) {
+    returnType += "*";
+    name = name.substring("*".length);
+  }
+
+  if (data.functions[name] !== undefined) {
+    return;
+  }
+
+  data.functions[name] = {
+    file,
+    return: {
+      type: returnType,
+    },
+    params: {},
   };
+}
+
+function appendOutputEnums(headerData: HeaderFileData): void {
+  const enumEntries = Object.entries(headerData.enums).sort((a, b) => {
+    const fileCompare = a[1].file.localeCompare(b[1].file);
+
+    if (fileCompare !== 0) {
+      return fileCompare;
+    }
+
+    return a[0].localeCompare(b[0]);
+  });
+
+  let file = "";
+  for (const [enumName, enumData] of enumEntries) {
+    if (enumData.file !== file) {
+      appendPrintf();
+      file = enumData.file;
+      appendPrintf(`// ${file}`);
+    }
+
+    const format =
+      enumData.specifier === "s" ? '"%s"' : `%${enumData.specifier}`;
+    appendPrintf(`export const %s = ${format};`, `"${enumName}"`, enumName);
+  }
+}
+
+function appendOutputFunctions(headerData: HeaderFileData): void {
+  const functionEntries = Object.entries(headerData.functions).sort((a, b) => {
+    const fileCompare = a[1].file.localeCompare(b[1].file);
+
+    if (fileCompare !== 0) {
+      return fileCompare;
+    }
+
+    return a[0].localeCompare(b[0]);
+  });
+
+  appendPrintf(`import { type FunctionMetadata } from "../_types.ts";`);
+
+  let file = "";
+  for (const [functionName, functionData] of functionEntries) {
+    if (functionData.file !== file) {
+      appendPrintf();
+      file = functionData.file;
+      appendPrintf("//");
+      appendPrintf(`// ${file}`);
+      appendPrintf("//");
+      appendPrintf();
+    }
+
+    appendPrintf(`export const %s: FunctionMetadata = {`, `"${functionName}"`);
+    appendPrintf(`\treturn: {`);
+    appendPrintf(`\t\ttype: "%s",`, `"${functionData.return.type}"`);
+    appendPrintf("\t},");
+    appendPrintf("};");
+    appendPrintf();
+  }
 }
 
 try {

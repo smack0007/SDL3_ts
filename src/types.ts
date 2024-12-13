@@ -9,3 +9,4 @@ export type Flags<T extends Record<string, number>, Name extends string> =
       [K in keyof T]: { [_]: Name } & T[K];
     }[keyof T]
   | number;
+
